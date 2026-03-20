@@ -46,18 +46,14 @@ prompt = ChatPromptTemplate.from_messages([
 chain = prompt | llm
 
  
-def main():
-
-    while True:
-        user_input = input("\n나: ").strip()
-        if not user_input:
-            continue
-        if user_input.lower() in ("exit", "quit"):
-            print("챗봇을 종료합니다. 안녕히 계세요!")
-            break
-
+def test(user_input:str) -> str:
+    
+    if user_input:
         response = chain.invoke(user_input)
-        print(f"\n AI: {response.content}")
-
+        return response.content
+    else:
+        return "답변할 수 없습니다. 죄송합니다"
 if __name__ == "__main__":
-    main()
+    user_input = input("\n나: ").strip()
+    print("AI:", test(user_input))
+    
