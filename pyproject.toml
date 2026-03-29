@@ -15,4 +15,6 @@ dependencies = [
     "langchain-community>=0.4.1",
     "pymupdf>=1.27.2.2",
     "langchain-chroma>=1.1.0",
+    "langchain-core>=1.2.23",
+    "langgraph>=1.1.3",
 ]

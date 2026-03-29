@@ -6,10 +6,12 @@ from langchain_classic.embeddings import CacheBackedEmbeddings
 from langchain_classic.storage import LocalFileStore
 from dotenv import load_dotenv
 import os
+import warnings
+warnings.filterwarnings("ignore", message="Using default key encoder")
 load_dotenv()
 
 CHROMA_PATH = "./chroma_db"
-FILE_PATH = "C:\\Users\\USER\\Desktop\\포폴\\425375a4-07c1-47be-8446-426b4237d513_Flooding_사용_설명서.pdf"
+FILE_PATH = os.getenv("FILE_PATH")
 
 def get_retriever():
     underlying_embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
