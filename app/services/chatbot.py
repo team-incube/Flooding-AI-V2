@@ -1,13 +1,17 @@
 from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
-from embedding import get_retriever
+from app.services.embedding import get_retriever
 from dotenv import load_dotenv
+import asyncio
 import os
 
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 retriever = get_retriever()
+
+import logging
+logging.basicConfig(level=logging.DEBUG)
 
 SYSTEM_PROMPT = """
 당신은 학교 웹사이트에서 동아리 및 기숙사 정보를 안내하는 AI 챗봇입니다.
@@ -53,11 +57,14 @@ agent = create_agent(
 )
 
 
-def ask(user_input: str) -> str:
-    result = agent.invoke({"messages": [("human", user_input)]})
+async def ask(user_input: str) -> str:
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: agent.invoke({"messages": [("human", user_input)]})
+    )
     return result["messages"][-1].content
 
 
 if __name__ == "__main__":
     user_input = input("\n나: ").strip()
-    print("AI:", ask(user_input))
+    print("AI:", asyncio.run(ask(user_input)))
