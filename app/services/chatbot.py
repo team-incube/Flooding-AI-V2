@@ -6,12 +6,11 @@ from dotenv import load_dotenv
 import asyncio
 import os
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+os.getenv("OPENAI_API_KEY")
 
 retriever = get_retriever()
 
-import logging
-logging.basicConfig(level=logging.DEBUG)
 
 SYSTEM_PROMPT = """
 당신은 학교 웹사이트에서 동아리 및 기숙사 정보를 안내하는 AI 챗봇입니다.
