@@ -5,16 +5,13 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from typing import Any
 import importlib
-import json
 import os
-from pathlib import Path
 
 load_dotenv()
 
 INPUT_SONG_COUNT = 5
 OUTPUT_LINK_COUNT = 3
 SPOTIFY_SEARCH_LIMIT = 10
-HISTORY_FILE = Path("recommended_history.json")
 
 llm = ChatOpenAI(
     model="gpt-5.4-mini",
@@ -155,24 +152,6 @@ def _exclude_songs(recommendations: list[dict], exclude_list: list[dict]) -> lis
     ]
 
 
-def _load_history() -> list[dict]:
-    if not HISTORY_FILE.exists():
-        return []
-    with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_history(tracks: list[dict]) -> None:
-    history = _load_history()
-    existing_keys = {_song_key(s["title"], s["artist"]) for s in history}
-    for track in tracks:
-        key = _song_key(track["title"], track["artist"])
-        if key not in existing_keys:
-            history.append(track)
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-
-
 def _build_spotify_queries(llm_result: dict) -> list[str]:
     analysis = llm_result.get("analysis", {})
     genre = str(analysis.get("genre", "")).strip()
@@ -273,14 +252,9 @@ async def recommend_top3_youtube_links(recent_songs: list[dict]) -> list[str]:
     if not recent_songs_text:
         recent_songs_text = "최근 신청곡 데이터 없음"
 
-    recommended_history = _load_history()
-    exclude_songs = normalized_songs + recommended_history
-
     llm_result = await music_chain.ainvoke({"recent_songs": recent_songs_text})
     queries = _build_spotify_queries(llm_result)
-    spotify_tracks = _search_spotify_tracks(queries, exclude_songs)
-    spotify_tracks = _exclude_songs(spotify_tracks, exclude_songs)
-
-    _save_history(spotify_tracks)
+    spotify_tracks = _search_spotify_tracks(queries, normalized_songs)
+    spotify_tracks = _exclude_songs(spotify_tracks, normalized_songs)
 
     return _extract_top3_links(spotify_tracks)
