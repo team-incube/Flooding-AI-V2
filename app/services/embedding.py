@@ -9,9 +9,8 @@ import os
 import warnings
 warnings.filterwarnings("ignore", message="Using default key encoder")
 load_dotenv()
-
 CHROMA_PATH = "./chroma_db"
-FILE_PATH = os.getenv("FILE_PATH")
+FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "Flooding_RAG용_문서.pdf")
 
 def get_retriever():
     underlying_embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
