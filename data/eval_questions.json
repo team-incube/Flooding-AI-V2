@@ -1,0 +1,20 @@
+{
+  "_readme": "flooding_rag.json 내용을 근거로 직접 채운 질문 15개입니다. 필요하면 자유롭게 수정/추가하세요. out_of_scope 항목은 문서에 근거가 없는 질문을 넣어서, 챗봇이 모르는 걸 지어내지 않고 '학교 담당 부서에 문의해주세요' 식으로 유보하는지 확인하는 용도입니다 — 여기서 AnswerRelevancy가 낮게 나오는 건 정상입니다.",
+  "questions": [
+    { "id": "q01", "category": "login", "question": "회원가입은 어떻게 하나요?" },
+    { "id": "q02", "category": "dormitory_study", "question": "기숙사 자습 신청은 몇 시부터 몇 시까지 할 수 있나요?" },
+    { "id": "q03", "category": "dormitory_massage", "question": "안마의자는 최대 몇 명까지 신청할 수 있어요?" },
+    { "id": "q04", "category": "dormitory_music", "question": "기상음악 AI 추천은 어떻게 받나요?" },
+    { "id": "q05", "category": "school_homebase", "question": "홈베이스는 몇 교시부터 예약할 수 있나요?" },
+    { "id": "q06", "category": "club_lookup", "question": "동아리는 어떻게 검색하나요?" },
+    { "id": "q07", "category": "club_establishment", "question": "동아리 개설 신청은 어떻게 하나요?" },
+    { "id": "q08", "category": "student_management", "question": "학생관리 화면은 누가 사용할 수 있나요?" },
+    { "id": "q09", "category": "settings", "question": "다크모드는 어떻게 켜나요?" },
+    { "id": "q10", "category": "faq", "question": "예약이나 신청이 계속 실패하면 어떻게 해야 하나요?" },
+    { "id": "q11", "category": "chatbot_principles", "question": "안마의자 신청 기능이 어디 있어요?" },
+    { "id": "q12", "category": "out_of_scope", "question": "동아리 활동비는 얼마나 지원되나요?" },
+    { "id": "q13", "category": "out_of_scope", "question": "기숙사 자습실에는 최대 몇 명까지 들어갈 수 있나요?" },
+    { "id": "q14", "category": "casual_chitchat", "question": "안녕! 오늘 날씨 어때?" },
+    { "id": "q15", "category": "ambiguous_or_compound", "question": "자습이랑 안마의자 신청 시간이 겹치나요? 둘 다 같이 신청할 수 있어요?" }
+  ]
+}
