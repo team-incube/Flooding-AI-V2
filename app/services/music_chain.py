@@ -7,14 +7,14 @@ from typing import Any
 import importlib
 import os
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 INPUT_SONG_COUNT = 5
 OUTPUT_LINK_COUNT = 3
 SPOTIFY_SEARCH_LIMIT = 10
 
 llm = ChatOpenAI(
-    model="gpt-5.4-mini",
+    model="gpt-4o-mini",
     api_key=os.getenv("OPENAI_API_KEY"),
     temperature=0.4,
 )
