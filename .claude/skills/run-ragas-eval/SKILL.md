@@ -22,6 +22,15 @@ the same `agent` object directly and pulls the contexts back out of the
 `ToolMessage`s in `result["messages"]`, instead of modifying `chatbot.py`'s
 public API just for evaluation purposes.
 
+The script supports **two targets** via `--target`:
+- `chatbot` (default) — `app.services.chatbot.agent`, the old `create_agent` version.
+- `langgraph` — `app.langgraph_services.graph.app_graph`, the LangGraph rewrite.
+  Contexts here come directly from the graph's `state["context"]` — no
+  tool-message parsing needed, since the graph already exposes it.
+
+Run one of each with the same question set to get a real before/after
+comparison instead of two baselines of the same system.
+
 ## Read this before interpreting scores
 
 **Low AnswerRelevancy is not automatically a regression.** The chatbot is
@@ -47,15 +56,22 @@ so a partially-filled file still runs, just with fewer samples.
 ### 2. Run the evaluation
 
 ```bash
-uv run python .claude/skills/run-ragas-eval/scripts/run_eval.py
+# old create_agent baseline
+uv run python .claude/skills/run-ragas-eval/scripts/run_eval.py --target chatbot
+
+# new LangGraph rewrite
+uv run python .claude/skills/run-ragas-eval/scripts/run_eval.py --target langgraph
 ```
 
-This will, per question:
-1. Invoke the real `app.services.chatbot.agent` (same agent `/ai/chat` uses)
-2. Collect the response and any `search_document` tool outputs as contexts
+(`--target` defaults to `chatbot` if omitted.) This will, per question:
+1. Invoke the real system for that target (`app.services.chatbot.agent` for
+   `chatbot`, `app.langgraph_services.graph.app_graph` for `langgraph`)
+2. Collect the response and retrieved contexts (from tool-call messages for
+   `chatbot`, directly from graph state for `langgraph`)
 3. Score the whole batch with RAGAS (Faithfulness, AnswerRelevancy, ContextRelevance)
-4. Print a summary + per-question breakdown to the console
-5. Save the full result to `data/eval_results/<timestamp>.json`
+4. Print a summary + per-question breakdown to the console (for `langgraph`,
+   each line also shows which `mode` route_question picked)
+5. Save the full result to `data/eval_results/<timestamp>_<target>.json`
 
 This calls OpenAI once per question for the chatbot itself, plus more calls
 per question per metric for RAGAS's judge model — expect it to take a while
@@ -70,11 +86,14 @@ To compare before/after, diff the `aggregate` blocks of two files in
 ls data/eval_results/
 ```
 
-Pick the two timestamps you want to compare (e.g. the baseline from before the
-LangGraph rewrite, and the newest one) and read both `aggregate` sections. Also
-skim `per_question` for any single question whose score moved a lot — an
-aggregate average can hide a question that got much worse while others
-improved.
+Pick a `_chatbot` run and a `_langgraph` run (or two runs of the same target
+taken at different times) and read both `aggregate` sections. Also skim
+`per_question` for any single question whose score moved a lot — an aggregate
+average can hide a question that got much worse while others improved. For
+`langgraph` runs, also check the `mode` field on questions whose contexts are
+empty — an empty context from `general_chat`/`booking`/route_question sending
+it straight to `web_search` is a routing decision, not the same thing as the
+RAG spine failing to find anything.
 
 ## Metrics reference
 

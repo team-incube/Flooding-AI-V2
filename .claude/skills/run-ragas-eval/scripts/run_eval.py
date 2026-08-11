@@ -2,22 +2,38 @@
 """Run a RAGAS quality evaluation against the chatbot.
 
 Usage:
-  uv run python .claude/skills/run-ragas-eval/scripts/run_eval.py
+  uv run python .claude/skills/run-ragas-eval/scripts/run_eval.py [--target chatbot|langgraph]
 
-Reads data/eval_questions.json, runs each question through the real chatbot
-agent (app.services.chatbot.agent), collects the retrieved contexts from the
-search_document tool calls, then scores the (question, response, contexts)
-triples with RAGAS: Faithfulness, AnswerRelevancy, ContextRelevance.
+Reads data/eval_questions.json and runs each question through one of two
+systems, selected with --target (default: chatbot):
+
+- chatbot   — app.services.chatbot.agent, the old create_agent version.
+              Contexts are pulled out of the search_document ToolMessages.
+- langgraph — app.langgraph_services.graph.app_graph, the LangGraph rewrite.
+              Contexts come straight from the graph's returned state["context"]
+              (whatever retrieve/web_search populated it with — no tool-message
+              parsing needed since the graph exposes it directly).
+
+Both produce the same (question, response, contexts) shape, scored with the
+same RAGAS metrics (Faithfulness, AnswerRelevancy, ContextRelevance), so a
+"before" run with --target chatbot and an "after" run with --target langgraph
+are directly comparable via the aggregate blocks in their saved reports.
 
 IMPORTANT — expected tradeoff, not a bug:
-Low AnswerRelevancy on out-of-scope questions is intentional. The chatbot is
+Low AnswerRelevancy on out-of-scope questions is intentional. Both systems are
 designed to defer ("학교 담당 부서에 문의해 주세요.") instead of hallucinating an
 answer when flooding_rag.json has no relevant content for the question. If a
-future rebuild scores lower on AnswerRelevancy specifically for the
-"out_of_scope" category in eval_questions.json, that's not necessarily a
-regression — check whether it's still deferring correctly before treating it
-as one.
+run scores lower on AnswerRelevancy specifically for the "out_of_scope"
+category in eval_questions.json, that's not necessarily a regression — check
+whether it's still deferring correctly before treating it as one.
+
+Also note for --target langgraph: route_question can send a question to
+general_chat/booking/web_search instead of the RAG spine (e.g. the
+"casual_chitchat" question), in which case contexts will legitimately be empty
+— that's a routing decision, not a retrieval failure. The per-question "mode"
+field in the saved report shows which path each question actually took.
 """
+import argparse
 import asyncio
 import json
 import os
@@ -39,7 +55,7 @@ RESULTS_DIR = PROJECT_ROOT / "data" / "eval_results"
 METRIC_NAMES = ["faithfulness", "answer_relevancy", "nv_context_relevance"]
 
 
-async def collect_samples() -> list[dict]:
+def load_questions() -> list[dict]:
     with QUESTIONS_PATH.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -48,7 +64,10 @@ async def collect_samples() -> list[dict]:
         print(f"No filled-in questions found in {QUESTIONS_PATH}.")
         print("Fill in the 'question' field for at least a few entries first.")
         sys.exit(1)
+    return questions
 
+
+async def collect_chatbot_samples(questions: list[dict]) -> list[dict]:
     # Imported here, not at module scope: this triggers chatbot.py's module-level
     # get_retriever() (builds/loads the Chroma DB) and needs OPENAI_API_KEY, so we
     # don't want to pay that cost just to discover the questions file is still empty.
@@ -78,6 +97,39 @@ async def collect_samples() -> list[dict]:
             }
         )
         print(f"  collected [{q.get('id', '?')}] {question_text[:50]}")
+
+    return samples
+
+
+async def collect_langgraph_samples(questions: list[dict]) -> list[dict]:
+    # Imported here for the same reason as collect_chatbot_samples: avoid paying
+    # for get_retriever() / TavilySearch setup just to find an empty questions file.
+    from langchain_core.messages import HumanMessage
+
+    from app.langgraph_services.graph import app_graph
+
+    samples = []
+    for q in questions:
+        question_text = q["question"].strip()
+        result = await app_graph.ainvoke({
+            "messages": [HumanMessage(content=question_text)],
+            "mode": "vectorstore",
+            "context": [],
+        })
+        response = result["messages"][-1].content
+        contexts = [doc.page_content for doc in (result.get("context") or [])]
+
+        samples.append(
+            {
+                "id": q.get("id", "?"),
+                "category": q.get("category", ""),
+                "question": question_text,
+                "response": response,
+                "contexts": contexts,
+                "mode": result.get("mode"),
+            }
+        )
+        print(f"  collected [{q.get('id', '?')}] mode={result.get('mode')} {question_text[:50]}")
 
     return samples
 
@@ -116,7 +168,7 @@ def score_samples(samples: list[dict]):
     return evaluate(dataset, metrics=metrics)
 
 
-def build_report(samples: list[dict], result) -> dict:
+def build_report(samples: list[dict], result, target: str) -> dict:
     per_question = []
     for i, s in enumerate(samples):
         row = {
@@ -126,6 +178,8 @@ def build_report(samples: list[dict], result) -> dict:
             "response": s["response"],
             "num_contexts": len(s["contexts"]),
         }
+        if "mode" in s:
+            row["mode"] = s["mode"]
         for metric in METRIC_NAMES:
             row[metric] = result[metric][i]
         per_question.append(row)
@@ -136,6 +190,7 @@ def build_report(samples: list[dict], result) -> dict:
 
     return {
         "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "target": target,
         "num_questions": len(samples),
         "questions_file": str(QUESTIONS_PATH.relative_to(PROJECT_ROOT)),
         "retriever": {"search_type": "mmr", "k": 7, "fetch_k": 20, "lambda_mult": 0.8},
@@ -145,14 +200,15 @@ def build_report(samples: list[dict], result) -> dict:
 
 
 def print_report(report: dict) -> None:
-    print("\n=== RAGAS Evaluation Summary ===")
+    print(f"\n=== RAGAS Evaluation Summary (target={report['target']}) ===")
     print(f"Questions: {report['num_questions']}")
     for metric, value in report["aggregate"].items():
         print(f"  {metric:>20}: {value:.3f}")
 
     print("\n--- Per-question scores ---")
     for row in report["per_question"]:
-        print(f"[{row['id']}] ({row['category'] or 'uncategorized'}) {row['question'][:40]}")
+        mode_suffix = f" [mode={row['mode']}]" if "mode" in row else ""
+        print(f"[{row['id']}] ({row['category'] or 'uncategorized'}){mode_suffix} {row['question'][:40]}")
         print(
             f"    faithfulness={row['faithfulness']:.2f}  "
             f"answer_relevancy={row['answer_relevancy']:.2f}  "
@@ -162,20 +218,36 @@ def print_report(report: dict) -> None:
 
 def save_report(report: dict) -> Path:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / f"{report['timestamp']}.json"
+    out_path = RESULTS_DIR / f"{report['timestamp']}_{report['target']}.json"
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     return out_path
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--target",
+        choices=["chatbot", "langgraph"],
+        default="chatbot",
+        help="chatbot = app.services.chatbot.agent (old create_agent). "
+        "langgraph = app.langgraph_services.graph.app_graph (LangGraph rewrite). Default: chatbot.",
+    )
+    args = parser.parse_args()
+
     print(f"Loading questions from {QUESTIONS_PATH.relative_to(PROJECT_ROOT)}...")
-    samples = asyncio.run(collect_samples())
+    questions = load_questions()
+
+    print(f"Target: {args.target}")
+    if args.target == "langgraph":
+        samples = asyncio.run(collect_langgraph_samples(questions))
+    else:
+        samples = asyncio.run(collect_chatbot_samples(questions))
 
     print(f"\nScoring {len(samples)} samples with RAGAS (this calls OpenAI for each metric)...")
     result = score_samples(samples)
 
-    report = build_report(samples, result)
+    report = build_report(samples, result, args.target)
     print_report(report)
 
     out_path = save_report(report)
