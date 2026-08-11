@@ -18,6 +18,10 @@ Package manager: **`uv`** (`.venv`, `uv.lock` are committed).
 > The chatbot is being **re-architected onto LangGraph** — this is a re-architecture, not a like-for-like port: it adds a web-search fallback, booking actions, and an Adaptive / self-corrective RAG loop. Target design: **`docs/v2-architecture.md`**.
 >
 > As of this writing the graph **does not exist yet** — `services/chatbot.py` is still the LangChain `create_agent` version (implicit agent loop + `search_document` tool). This work is starting now, so treat `docs/v2-architecture.md` as the spec to build against. Once the graph is in place, delete this block and describe the live graph structure here instead.
+>
+> Note: the RAG spine's retry logic has **two separate, independently-capped retry
+> counters** (retrieval-side vs. answer-side) — see `docs/v2-architecture.md`
+> for the exact loop shape before touching `grade_documents` / `grade_answer`.
 
 ## Development Commands
 
@@ -69,7 +73,7 @@ data/
 
 ### Where the LangGraph re-architecture is headed
 
-The target is an Adaptive / self-corrective RAG graph with a separate booking sub-graph and a fallback-only web search. The full node/edge spec, routing rules, and retry caps live in **`docs/v2-architecture.md`** — that is the single source of truth for the rewrite. Keep the existing RAGAS metrics comparable so before/after quality can be measured on the same question set.
+The target is an Adaptive / self-corrective RAG graph with a separate booking sub-graph and a fallback-only web search. Retrieval failures and answer failures are corrected by **two distinct, capped retry loops** rather than one shared loop — see `docs/v2-architecture.md` for the exact node/edge spec, routing rules, and retry caps; that is the single source of truth for the rewrite. Keep the existing RAGAS metrics comparable so before/after quality can be measured on the same question set.
 
 ## Core Principles
 
