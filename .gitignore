@@ -3,3 +3,8 @@
 .env
 *.env
 !*.env.example
+
+__pycache__/
+cache/
+chroma_db/
+data/eval_results/
