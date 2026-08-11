@@ -5,11 +5,13 @@ from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
 from pydantic import BaseModel, Field
 
 from app.langgraph_services.prompts import (
     ANSWER_GRADE_SYSTEM_PROMPT,
     DOCUMENT_GRADE_SYSTEM_PROMPT,
+    GENERAL_CHAT_SYSTEM_PROMPT,
     ROUTE_MODES,
     ROUTE_SYSTEM_PROMPT,
     TRANSFORM_QUERY_SYSTEM_PROMPT,
@@ -29,6 +31,18 @@ DOCUMENT_IRRELEVANCE_THRESHOLD = 0.3
 MAX_RETRIEVE_RETRY = 1
 MAX_ANSWER_RETRY = 1
 
+# 전체 페이지 크롤링이 아니라 요약 스니펫만 받도록 include_raw_content=False로 고정.
+MAX_WEB_SEARCH_RESULTS = 5
+
+try:
+    web_search_tool = TavilySearch(
+        max_results=MAX_WEB_SEARCH_RESULTS,
+        search_depth="basic",
+        include_raw_content=False,
+    )
+except Exception:
+    web_search_tool = None  # TAVILY_API_KEY 없음 등 — web_search가 빈 context로 안전하게 폴백
+
 
 class DocumentRelevanceGrade(BaseModel):
     binary_score: bool = Field(description="검색된 문서가 질문과 관련 있으면 true, 없으면 false")
@@ -45,7 +59,7 @@ answer_grader_llm = llm.with_structured_output(AnswerGrade)
 
 class GraphState(TypedDict):
     messages: list[AnyMessage]
-    mode: Literal["vectorstore", "booking", "general_chat"]
+    mode: Literal["vectorstore", "booking", "general_chat", "web_search"]
     context: list[Document]
     documents_grade: NotRequired[Literal["relevant", "not_relevant"]]
     answer_grade: NotRequired[Literal["pass", "fail"]]
@@ -72,10 +86,9 @@ def _last_message_content(messages: list[AnyMessage], message_type: type) -> str
 
 
 async def route_question(state: GraphState) -> dict:
-    """LLM으로 질문을 vectorstore / booking / general_chat 로 분류한다.
+    """LLM으로 질문을 vectorstore / booking / general_chat / web_search 로 분류한다.
 
-    지금 단계에선 vectorstore 경로만 실제로 동작한다.
-    booking / general_chat 은 다음 단계까지의 자리표시용 스텁이다.
+    booking은 아직 실제 예약 서브그래프가 없어 자리표시(booking_stub)로 응답한다.
     """
     question = state["messages"][-1].content
     response = await llm.ainvoke([
@@ -90,16 +103,30 @@ async def route_question(state: GraphState) -> dict:
     return {"mode": mode}
 
 
+def _bump_answer_retry_if_reentering(state: GraphState) -> dict:
+    """grade_answer가 "fail"을 낸 뒤 같은 노드로 재진입한 경우에만 answer_retry_count를 올린다."""
+    if state.get("answer_grade") == "fail":
+        return {"answer_retry_count": state.get("answer_retry_count", 0) + 1}
+    return {}
+
+
 async def booking_stub(state: GraphState) -> dict:
-    """다음 단계(3단계)에서 실제 예약 서브그래프로 교체될 자리표시."""
+    """다음 단계(3단계)에서 실제 예약 서브그래프로 교체될 자리표시. grade_answer도 다른 경로와
+    동일하게 거치므로, 재시도 진입 시 answer_retry_count도 똑같이 올려준다."""
+    update = _bump_answer_retry_if_reentering(state)
     reply = "예약 기능은 아직 준비 중입니다. (booking 서브그래프는 다음 단계에서 구현)"
-    return {"messages": state["messages"] + [AIMessage(content=reply)]}
+    return {**update, "messages": state["messages"] + [AIMessage(content=reply)]}
 
 
-async def general_chat_stub(state: GraphState) -> dict:
-    """다음 단계에서 실제 일반 대화 응답으로 교체될 자리표시."""
-    reply = "일반 대화 응답은 아직 준비 중입니다. (general_chat 분기는 다음 단계에서 구현)"
-    return {"messages": state["messages"] + [AIMessage(content=reply)]}
+async def general_chat(state: GraphState) -> dict:
+    """RAG 검색/채점은 거치지 않지만, generate와 동일하게 grade_answer 검증 대상이다."""
+    update = _bump_answer_retry_if_reentering(state)
+    question = state["messages"][-1].content
+    response = await llm.ainvoke([
+        SystemMessage(content=GENERAL_CHAT_SYSTEM_PROMPT),
+        HumanMessage(content=question),
+    ])
+    return {**update, "messages": state["messages"] + [AIMessage(content=response.content)]}
 
 
 async def retrieve(state: GraphState) -> dict:
@@ -165,33 +192,60 @@ async def transform_query(state: GraphState) -> dict:
 
 
 async def web_search(state: GraphState) -> dict:
-    """booking_stub / general_chat_stub과 같은 자리표시 노드. 실제 검색 도구(Tavily/DDG 등)가
-    아직 연동되어 있지 않아 빈 context를 반환하고, generate가 "모른다" 답변으로 폴백한다."""
-    return {"context": []}
+    """Tavily로 폴백 검색한다. 도구가 없거나(TAVILY_API_KEY 미설정) 호출이 실패하거나
+    결과가 없으면 빈 context를 반환해 generate가 "모른다" 답변으로 안전하게 폴백한다."""
+    if web_search_tool is None:
+        return {"context": []}
+
+    query = state.get("query") or state["messages"][-1].content
+
+    try:
+        raw_results = await web_search_tool.ainvoke({"query": query})
+    except Exception:
+        return {"context": []}
+
+    results = raw_results.get("results") if isinstance(raw_results, dict) else None
+    if not results:
+        return {"context": []}
+
+    docs = [
+        Document(
+            page_content=result["content"],
+            metadata={"source": result.get("url", ""), "title": result.get("title", "")},
+        )
+        for result in results
+        if result.get("content")
+    ]
+    return {"context": docs}
 
 
 async def generate(state: GraphState) -> dict:
-    """검색된 context 로만 답변 생성. context 가 비면 '모른다' 답변으로 분기.
+    """검색/웹검색 context로만 답변 생성. context 가 비면 '모른다' 답변으로 분기.
 
-    answer_grade가 이미 "fail"인 채로 재진입하면(grade_answer 재시도) answer_retry_count를
-    증가시킨다. 같은 context로만 재생성하며 재검색이나 query 재작성은 하지 않는다.
+    grade_answer 재시도 시(answer_grade="fail") 같은 context로만 재생성하며,
+    재검색이나 query 재작성은 하지 않는다.
     """
-    update: dict = {}
-    if state.get("answer_grade") == "fail":
-        update["answer_retry_count"] = state.get("answer_retry_count", 0) + 1
+    update = _bump_answer_retry_if_reentering(state)
 
     context = state.get("context") or []
 
     if not context:
-        reply = "관련 문서를 찾을 수 없어 답변드릴 수 없습니다. 학교 담당 부서에 문의해 주세요."
+        if state.get("mode") == "web_search":
+            reply = "죄송해요, 관련 정보를 찾지 못했어요."
+        else:
+            reply = "관련 문서를 찾을 수 없어 답변드릴 수 없습니다. 학교 담당 부서에 문의해 주세요."
         return {**update, "messages": state["messages"] + [AIMessage(content=reply)]}
 
     question = state["messages"][-1].content
-    context_text = "\n\n".join(doc.page_content for doc in context)
+    context_text = "\n\n".join(
+        f"{doc.page_content}\n(출처: {doc.metadata['source']})" if doc.metadata.get("source") else doc.page_content
+        for doc in context
+    )
 
     prompt = (
         "당신은 학교 웹사이트(Flooding)의 AI 챗봇입니다. "
-        "아래 문서 내용만 사용해서 질문에 답변하세요. 존댓말을 사용하세요.\n\n"
+        "아래 문서 내용만 사용해서 질문에 답변하세요. 존댓말을 사용하세요. "
+        "문서에 (출처: ...)가 붙어 있으면 답변 마지막에 참고한 출처를 밝히세요.\n\n"
         f"[문서]\n{context_text}\n\n"
         f"[질문]\n{question}"
     )

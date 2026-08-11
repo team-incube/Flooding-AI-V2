@@ -4,7 +4,7 @@ from langgraph.graph import END, START, StateGraph
 from app.langgraph_services.nodes import (
     GraphState,
     booking_stub,
-    general_chat_stub,
+    general_chat,
     generate,
     grade_answer,
     grade_documents,
@@ -25,7 +25,7 @@ def build_graph():
 
     graph.add_node("route_question", route_question)
     graph.add_node("booking_stub", booking_stub)
-    graph.add_node("general_chat_stub", general_chat_stub)
+    graph.add_node("general_chat", general_chat)
     graph.add_node("retrieve", retrieve)
     graph.add_node("grade_documents", grade_documents)
     graph.add_node("transform_query", transform_query)
@@ -39,7 +39,8 @@ def build_graph():
         route_after_question,
         {
             "booking_stub": "booking_stub",
-            "general_chat_stub": "general_chat_stub",
+            "general_chat": "general_chat",
+            "web_search": "web_search",
             "retrieve": "retrieve",
         },
     )
@@ -50,22 +51,25 @@ def build_graph():
         {
             "generate": "generate",
             "transform_query": "transform_query",
-            "web_search": "web_search",
         },
     )
     graph.add_edge("transform_query", "retrieve")
     graph.add_edge("web_search", "generate")
+
+    # generate/general_chat/booking_stub 모두 여기서 만나 grade_answer로 검증받는다.
     graph.add_edge("generate", "grade_answer")
+    graph.add_edge("general_chat", "grade_answer")
+    graph.add_edge("booking_stub", "grade_answer")
     graph.add_conditional_edges(
         "grade_answer",
         route_after_grade_answer,
         {
             "generate": "generate",
+            "general_chat": "general_chat",
+            "booking_stub": "booking_stub",
             END: END,
         },
     )
-    graph.add_edge("booking_stub", END)
-    graph.add_edge("general_chat_stub", END)
 
     return graph.compile()
 

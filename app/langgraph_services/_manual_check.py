@@ -77,7 +77,7 @@ async def _test_rag_spine():
     assert result1.get("answer_retry_count", 0) == 0
 
     print("\n2) 문서에 없는 질문 -> not_relevant -> transform_query -> retrieve"
-          " -> 그래도 not_relevant -> web_search -> generate")
+          " -> 그래도 not_relevant -> web_search 없이 바로 generate(빈 context, '모른다')")
     result2 = await app_graph.ainvoke({
         "messages": [HumanMessage(content="웹사이트 폰트 크기는 어떻게 조절하나요?")],
         "mode": "vectorstore",
@@ -90,6 +90,7 @@ async def _test_rag_spine():
     )
     print(f"   AI: {result2['messages'][-1].content}")
     assert result2.get("retrieve_retry_count", 0) == 1
+    assert result2.get("context") == []  # vectorstore는 재검색 소진 후 web_search로 새지 않는다
 
     print("\n3) grade_answer를 강제로 실패시켜 generate 재진입 -> 상한 후 END")
 
@@ -122,6 +123,47 @@ async def _test_rag_spine():
     print("\n=== RAG spine 통합 테스트 통과 ===")
 
 
+async def _test_unified_answer_gate():
+    """generate/general_chat/booking_stub이 전부 grade_answer를 거쳐서 END로 가는지,
+    route_question이 web_search를 4번째 카테고리로 분류하는지 확인한다."""
+    print("\n=== 통합 answer-gate 테스트 ===")
+
+    print("\n1) 잡담 -> general_chat, RAG 안 거치고 grade_answer는 거침")
+    result1 = await app_graph.ainvoke({
+        "messages": [HumanMessage(content="안녕")],
+        "mode": "vectorstore",
+        "context": [],
+    })
+    print(f"   mode={result1['mode']} answer_grade={result1.get('answer_grade')}")
+    print(f"   AI: {result1['messages'][-1].content}")
+    assert result1["mode"] == "general_chat"
+    assert result1.get("documents_grade") is None
+    assert result1.get("answer_grade") is not None
+
+    print("\n2) 예약 의도 -> booking, grade_answer도 거침")
+    result2 = await app_graph.ainvoke({
+        "messages": [HumanMessage(content="안마의자 예약하고 싶어요")],
+        "mode": "vectorstore",
+        "context": [],
+    })
+    print(f"   mode={result2['mode']} answer_grade={result2.get('answer_grade')}")
+    print(f"   AI: {result2['messages'][-1].content}")
+    assert result2["mode"] == "booking"
+    assert result2.get("answer_grade") is not None
+
+    print("\n3) 학교 무관 + 최신정보 필요 -> web_search로 바로 분류, 실제 검색 후 generate")
+    result3 = await app_graph.ainvoke({
+        "messages": [HumanMessage(content="2025년 노벨 물리학상은 누가 받았나요?")],
+        "mode": "vectorstore",
+        "context": [],
+    })
+    print(f"   mode={result3['mode']} context_count={len(result3.get('context') or [])}")
+    print(f"   AI: {result3['messages'][-1].content}")
+    assert result3["mode"] == "web_search"
+
+    print("\n=== 통합 answer-gate 테스트 통과 ===")
+
+
 if __name__ == "__main__":
     sample_questions = [
         "기숙사 세탁기는 어떻게 신청하나요?",
@@ -144,5 +186,6 @@ if __name__ == "__main__":
 
         await _test_graders()
         await _test_rag_spine()
+        await _test_unified_answer_gate()
 
     asyncio.run(main())
