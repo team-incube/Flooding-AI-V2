@@ -35,7 +35,8 @@ RUN pip install --no-cache-dir \
     pymupdf>=1.27.2.2 \
     langchain-chroma>=1.1.0 \
     langchain-core>=1.2.23 \
-    langgraph>=1.1.3
+    langgraph>=1.1.3 \
+    langchain-tavily>=0.2.18
 
 # Expose port for FastAPI
 EXPOSE 8000

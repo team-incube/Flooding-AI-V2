@@ -8,7 +8,7 @@ FastAPI service; the entrypoint is `app.main:app`.
 The chatbot currently answers questions about how to use the site via a RAG pipeline.
 The music feature turns a user's recent song requests into YouTube recommendations.
 
-**Tech stack:** Python ≥3.12, FastAPI, Uvicorn · LangChain 1.x (Core / Community) + LangGraph · LangChain-Chroma (vector DB) · OpenAI (`langchain-openai`) for the chat LLM and embeddings · Spotipy (Spotify API) + google-api-python-client (YouTube API) for music · `ragas` / `datasets` for RAG evaluation (present in deps, eval skill in progress).
+**Tech stack:** Python ≥3.12, FastAPI, Uvicorn · LangChain 1.x (Core / Community) + LangGraph · LangChain-Chroma (vector DB) · OpenAI (`langchain-openai`) for the chat LLM and embeddings · `langchain-tavily` for the RAG spine's web-search fallback · Spotipy (Spotify API) + google-api-python-client (YouTube API) for music · `ragas` / `datasets` for RAG evaluation (present in deps, eval skill in progress).
 Package manager: **`uv`** (`.venv`, `uv.lock` are committed).
 
 <!-- ─────────────────────────────────────────────────────────────
@@ -101,6 +101,7 @@ The target is an Adaptive / self-corrective RAG graph with a separate booking su
 - **`.env` lives at `app/services/.env`, not the repo root.** All three services (`chatbot.py`, `embedding.py`, `music_chain.py`) load it via `os.path.dirname(__file__)/.env`.
 - **Chroma is not auto-rebuilt.** If `./chroma_db` already exists, changes to `flooding_rag.json` are ignored. After editing RAG docs, use the `rebuild-vectordb` skill (or delete `./chroma_db/` and re-run) to reflect them.
 - **Spotify creds are required for music.** Without `SPOTIPY_CLIENT_ID` / `SPOTIPY_CLIENT_SECRET`, `/ai/song` returns empty results.
+- **Tavily key is optional but recommended for `web_search`.** Without `TAVILY_API_KEY`, the RAG spine's `web_search` node safely falls back to an empty context (no crash) and `generate` answers "don't know" instead of fabricating.
 - **Dockerfile ↔ pyproject mismatch:** the Docker `pip install` list omits `ragas` and `datasets` (present in `pyproject.toml`). Harmless today (not used in the serving path) but keep in mind if evaluation code moves into the runtime image.
 
 ## Environment Variables (`app/services/.env`)
@@ -108,3 +109,4 @@ The target is an Adaptive / self-corrective RAG graph with a separate booking su
 - `OPENAI_API_KEY` — chat LLM, embeddings, and music LLM all need it.
 - `YOUTUBE_API_KEY` — YouTube link search.
 - `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET` — Spotify search.
+- `TAVILY_API_KEY` — `web_search` fallback node in the LangGraph chatbot; optional (safe fallback if unset).
