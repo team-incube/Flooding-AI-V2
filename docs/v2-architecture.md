@@ -21,27 +21,41 @@ debuggability, and is measurable against the existing RAGAS baseline.
 
 ## Top-level routing
 
-`route_question` classifies each turn into one of three destinations:
+`route_question` classifies each turn into one of **four** destinations:
 
-- **vectorstore** → RAG spine (site usage + dorm rules).
+- **vectorstore** → RAG spine (site usage + dorm rules). Everything reachable
+  from here is treated as school-related, so answers here **must** stay
+  document-grounded — see the "why `web_search` isn't in the RAG spine" note
+  below.
 - **booking** → a separate sub-graph for actions (study-room / massage-chair /
-  song requests). See "Booking sub-graph".
-- **general_chat** → plain LLM reply (small talk / out-of-scope).
+  song requests). See "Booking sub-graph". Currently a stub (`booking_stub`).
+- **general_chat** → small talk / no factual content needed (e.g. "안녕", "너
+  누구야"). One LLM call, no retrieval, no search.
+- **web_search** → the question needs current/factual information but is
+  **not** about the school (e.g. "오늘 날씨 어때", "2025년 노벨 물리학상 누가
+  받았어"). Runs a real web search (Tavily) and answers from those results.
+
+All four destinations converge on the same answer-gate — see "Answer gate"
+below. `route_question` is a single LLM call classifying into these four
+labels; it does not need a second pass to decide "does this need a search."
 
 ## RAG spine (self-corrective)
 
 ```
-retrieve → grade_documents ──(relevant)──────────────→ generate → grade_answer ──(pass)──→ END
-              │  (not relevant)                                       │ (fail, same docs,
-              ▼                                                       │  capped 1–2 retries)
-        retrieve_retry_count < 1 ?                                    │
-              │ yes                    │ no                           │
-              ▼                        ▼                               │
-        transform_query ─────────► web_search ──► generate ◄──────────┘
-        (rewrite query,           (fallback,      (loops back into
-         back to retrieve,         not re-graded)   grade_answer above)
+retrieve → grade_documents ──(relevant)───────────────────────→ generate
+              │  (not relevant)
+              ▼
+        retrieve_retry_count < 1 ?
+              │ yes                    │ no
+              ▼                        ▼
+        transform_query ─────► generate (context stays empty → "don't know")
+        (rewrite query,
+         back to retrieve,
          retrieve_retry_count+=1)
 ```
+
+`generate` here feeds into the shared **answer gate** (`generate → grade_answer`),
+described below — this diagram only covers retrieval + document grading.
 
 This graph has **two separate, independently-capped retry loops** — they must not
 share a counter, and neither should leak into the other:
@@ -50,13 +64,15 @@ share a counter, and neither should leak into the other:
   `grade_documents` finds nothing relevant, the *first* time this happens for a
   turn it goes to `transform_query` and back to `retrieve` (re-search the vector
   store with a rewritten query). If it's *still* not relevant after that one
-  reformulated re-search, the graph gives up on the vector store and falls
-  through to `web_search` instead of trying `transform_query` again.
-- **Answer-side loop** (`answer_retry_count`, cap = **1–2**): when `grade_answer`
+  reformulated re-search, the graph gives up — straight to `generate` with an
+  empty `context`, which answers "don't know" (see below, and "why `web_search`
+  isn't in the RAG spine").
+- **Answer-side loop** (`answer_retry_count`, cap = **1**): when `grade_answer`
   fails (hallucination or off-topic), the graph does **not** re-retrieve or
-  re-rewrite the query — it goes straight back to `generate` with the **same**
-  retrieved/fallback documents, i.e. it's a "try producing a better answer from
-  what we already have" retry, not a search retry.
+  re-rewrite the query — it goes straight back to whichever node produced the
+  answer, with the **same** context, i.e. it's a "try producing a better answer
+  from what we already have" retry, not a search retry. This loop is shared by
+  every top-level destination — see "Answer gate" below.
 
 Add both counters to graph `State` (e.g. `retrieve_retry_count: int`,
 `answer_retry_count: int`), reset per user turn.
@@ -68,36 +84,79 @@ Add both counters to graph `State` (e.g. `retrieve_retry_count: int`,
   - not relevant, `retrieve_retry_count == 0` → `transform_query` → back to
     `retrieve` (increments `retrieve_retry_count`)
   - not relevant, `retrieve_retry_count >= 1` (already retried once) →
-    `web_search`
+    `generate` (empty context, "don't know")
 - **transform_query** — rewrites the question for a better vector-store re-search.
-  In this design it feeds back into `retrieve`, **not** directly into
-  `web_search` — the rewritten query gets one shot at the vector store before
-  the graph falls back to the web.
-- **web_search** — fallback only, fires after the one allowed retrieval retry is
-  exhausted. Results go **straight to `generate`**; they are **not** re-graded
-  by `grade_documents` (avoids a re-grading loop).
+  Feeds back into `retrieve` — the rewritten query gets one shot at the vector
+  store before the graph gives up on it for this turn.
 - **generate** — answer from context only. If context is empty, answer "don't
   know" rather than inventing (this replaces the prompt-only `[절대 금지]` rule
-  with a structural branch).
-- **grade_answer** — hallucination + question-relevance check.
-  - pass → `END`
-  - fail → back to **`generate`** (regenerate from the same context), **capped
-    at 1–2 retries** via `answer_retry_count` so latency can't blow up. This
-    loop does not touch retrieval or the query at all.
+  with a structural branch). Feeds into the shared answer gate.
 
-### `web_search` is fallback-only
+### Why `web_search` isn't in the RAG spine
 
-It fires in exactly two cases, and never on a normal turn (token/latency cost):
+Reaching the RAG spine (`vectorstore` mode) means the question is about the
+school by construction — `route_question` only sends usage-shaped questions
+here. A live web search **cannot reliably answer internal-only school
+procedures** (dorm laundry, dorm rules, etc.) and will confidently cite
+unrelated sources if allowed to try (observed in testing: a laundry-machine
+question with no matching RAG doc got answered from an unrelated blog about a
+different building's laundry app). So for `vectorstore`, "not found after one
+retry" means **"don't know"**, never "let the open web guess" — no fallback to
+`web_search` from inside the RAG spine.
 
-1. `route_question` decides the answer isn't in our docs (routes straight to web).
-2. `grade_documents` rejects **all** retrieved docs on the retry attempt (i.e.
-   after the one `transform_query → retrieve` reformulation has already been
-   used up for this turn).
+`web_search` is real (Tavily, see "Answer gate"), but only reachable as its own
+top-level `route_question` destination, for questions that are explicitly
+**not** about the school. Dorm-rules documents are also still **not** loaded
+into the vector store (only usage/how-to documents are indexed) — belt-and-
+suspenders with the same reasoning.
 
-Note: dorm rules are internal docs, so web search generally can't answer
-rules questions. **Decision:** dorm-rules documents are **not** loaded into the
-vector store — only usage/how-to documents are indexed, so this edge case does
-not arise for now. Revisit if rules content is added later.
+## Answer gate (shared by every path)
+
+Every top-level destination produces its answer through a **different** node,
+but they all converge on the same two nodes before `END`:
+
+```
+generate ─────────┐
+general_chat ──────┼──→ grade_answer ──(pass)──→ END
+booking_stub ──────┘         │ (fail, answer_retry_count < 1)
+                              ▼
+                    back to whichever node produced the answer
+                    (generate / general_chat / booking_stub — same context,
+                     no re-retrieval, no re-routing)
+                              │ (fail, answer_retry_count >= 1)
+                              ▼
+                             END  (best-effort answer, no infinite loop)
+```
+
+- **generate** — used by `vectorstore` (RAG context) and `web_search` (Tavily
+  results). Answers from `context` only; empty `context` → "don't know".
+- **general_chat** — free-form reply, no `context` at all.
+- **booking_stub** — fixed placeholder reply (booking sub-graph isn't built yet).
+- **grade_answer** — runs after *all three*, uniformly. There's no special-case
+  skip for `general_chat`/`booking_stub` just because they have no `context` —
+  in practice `grade_answer`'s `grounded_in_context` check doesn't penalize an
+  answer that isn't claiming anything from a document (e.g. a greeting), so
+  this doesn't manufacture spurious failures on every chat turn.
+- Retry destination on `fail` is **mode-aware** (`route_after_grade_answer`
+  looks at `state["mode"]`): `general_chat` retries `general_chat`, `booking`
+  retries `booking_stub`, everything else (`vectorstore`, `web_search`) retries
+  `generate`. This is the same `answer_retry_count` loop described above — one
+  shared counter and cap, regardless of which node it's retrying.
+
+## `web_search` (Tavily, real search)
+
+- Reachable **only** from `route_question` classifying a turn as `web_search`
+  (not about the school, needs current/factual info) — never from inside the
+  RAG spine (see "Why `web_search` isn't in the RAG spine").
+- Fetches a handful of results (max 5, snippet-only — no full-page crawl) and
+  turns them into `Document`s with `metadata["source"]` set to the result URL,
+  same shape `retrieve` produces, so `generate` handles both identically.
+- `generate` cites `metadata["source"]` in the reply when present (RAG-store
+  docs don't carry `source`, so citation only shows up for real web results).
+- If `TAVILY_API_KEY` is missing or the request fails, falls back to an empty
+  `context` — `generate` answers "don't know" instead of crashing or inventing.
+- Results are **not** re-graded by `grade_documents` — they go straight into
+  `generate`, then through the same `grade_answer` gate as everything else.
 
 ## Booking sub-graph (actions, outside the RAG loop)
 
@@ -124,7 +183,7 @@ extract_booking_slot → confirm_with_user → execute_booking
   (e.g. cosine < 0.75 → "not relevant") for the first pass in `grade_documents`,
   and only send ambiguous cases to an LLM grader.
 - Keep both retry loops bounded: `retrieve_retry_count` cap **1**,
-  `answer_retry_count` cap **1–2**. This matters under concurrency (the async
+  `answer_retry_count` cap **1**. This matters under concurrency (the async
   handling that already cut response time ~2×).
 
 ## Measurement
@@ -138,8 +197,11 @@ can be reported as a before/after delta. Capture the baseline on the current
 
 1. Minimal skeleton: `route_question` + `retrieve` + `generate` (hand-written).
    **Done.**
-2. Add grading + correction: `grade_documents`, `transform_query`, `web_search`,
-   `grade_answer`, with the **two separate retry caps** described above
-   (`retrieve_retry_count` cap 1, `answer_retry_count` cap 1–2). ← current step.
-3. Add the booking sub-graph.
-4. Re-run `run-ragas-eval` and compare against baseline.
+2. Add grading + correction: `grade_documents`, `transform_query`, `grade_answer`,
+   with the **two separate retry caps** described above (`retrieve_retry_count`
+   cap 1, `answer_retry_count` cap 1). **Done.**
+3. Add real `web_search` (Tavily) as its own `route_question` destination, and
+   the shared answer gate (`generate`/`general_chat`/`booking_stub` → `grade_answer`).
+   **Done.**
+4. Add the real booking sub-graph (replace `booking_stub`).
+5. Re-run `run-ragas-eval` and compare against baseline.
