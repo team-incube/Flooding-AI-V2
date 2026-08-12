@@ -11,17 +11,23 @@ The music feature turns a user's recent song requests into YouTube recommendatio
 **Tech stack:** Python ≥3.12, FastAPI, Uvicorn · LangChain 1.x (Core / Community) + LangGraph · LangChain-Chroma (vector DB) · OpenAI (`langchain-openai`) for the chat LLM and embeddings · `langchain-tavily` for the RAG spine's web-search fallback · Spotipy (Spotify API) + google-api-python-client (YouTube API) for music · `ragas` / `datasets` for RAG evaluation (present in deps, eval skill in progress).
 Package manager: **`uv`** (`.venv`, `uv.lock` are committed).
 
-<!-- ─────────────────────────────────────────────────────────────
-     CURRENT-WORK STATUS  ·  swap this whole block when the graph lands
-     ───────────────────────────────────────────────────────────── -->
-> **Status — read before editing `services/chatbot.py`.**
-> The chatbot is being **re-architected onto LangGraph** — this is a re-architecture, not a like-for-like port: it adds a web-search fallback, booking actions, and an Adaptive / self-corrective RAG loop. Target design: **`docs/v2-architecture.md`**.
->
-> As of this writing the graph **does not exist yet** — `services/chatbot.py` is still the LangChain `create_agent` version (implicit agent loop + `search_document` tool). This work is starting now, so treat `docs/v2-architecture.md` as the spec to build against. Once the graph is in place, delete this block and describe the live graph structure here instead.
+> **Status — the LangGraph rewrite is live.**
+> `POST /ai/chat` (`app/api/chat_API.py`) now calls `app.langgraph_services.graph.ask`,
+> **not** `app/services/chatbot.py` — the old `create_agent` version is kept only for
+> the RAGAS before/after baseline (`run-ragas-eval --target chatbot`), it is no
+> longer in the serving path. The live graph is `app/langgraph_services/graph.py`
+> (nodes in `nodes.py`, routing in `routing.py`, prompts in `prompts.py`); its full
+> node/edge spec, including the booking sub-graph (apply-only — study room /
+> massage chair / wake-up music; **no cancellation, no confirmation step**), lives
+> in **`docs/v2-architecture.md`** — keep that doc in sync when nodes/edges change.
 >
 > Note: the RAG spine's retry logic has **two separate, independently-capped retry
 > counters** (retrieval-side vs. answer-side) — see `docs/v2-architecture.md`
 > for the exact loop shape before touching `grade_documents` / `grade_answer`.
+>
+> Booking calls the dev API at `https://dev.flooding.kr` with the `Authorization`
+> header `chat_API.py` receives on `/ai/chat`, forwarded through `GraphState.auth_token`
+> — never logged. See `docs/v2-architecture.md`'s "Booking sub-graph" section.
 
 ## Development Commands
 
