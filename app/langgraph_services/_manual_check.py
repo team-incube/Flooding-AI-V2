@@ -124,7 +124,7 @@ async def _test_rag_spine():
 
 
 async def _test_unified_answer_gate():
-    """generate/general_chat/booking_stub이 전부 grade_answer를 거쳐서 END로 가는지,
+    """generate/general_chat/execute_booking이 전부 grade_answer를 거쳐서 END로 가는지,
     route_question이 web_search를 4번째 카테고리로 분류하는지 확인한다."""
     print("\n=== 통합 answer-gate 테스트 ===")
 

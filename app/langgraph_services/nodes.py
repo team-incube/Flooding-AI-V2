@@ -1,6 +1,9 @@
 import os
+import re
 from typing import Literal, NotRequired, TypedDict
+from urllib.parse import urlparse
 
+import httpx
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
@@ -10,8 +13,10 @@ from pydantic import BaseModel, Field
 
 from app.langgraph_services.prompts import (
     ANSWER_GRADE_SYSTEM_PROMPT,
+    BOOKING_INTENT_SYSTEM_PROMPT,
     DOCUMENT_GRADE_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
+    GENERATE_SYSTEM_PROMPT,
     ROUTE_MODES,
     ROUTE_SYSTEM_PROMPT,
     TRANSFORM_QUERY_SYSTEM_PROMPT,
@@ -34,6 +39,22 @@ MAX_ANSWER_RETRY = 1
 # 전체 페이지 크롤링이 아니라 요약 스니펫만 받도록 include_raw_content=False로 고정.
 MAX_WEB_SEARCH_RESULTS = 5
 
+# 개발 서버. 취소는 이번 범위에서 제외 — 신청 3종만 지원.
+BOOKING_API_BASE_URL = "https://dev.flooding.kr"
+BOOKING_ENDPOINTS = {
+    "apply_study": ("POST", "/domitory/study"),
+    "apply_massage": ("POST", "/domitory/massage"),
+    "apply_music": ("POST", "/domitory/music"),
+}
+BOOKING_SUCCESS_MESSAGES = {
+    "apply_study": "자습실 신청이 완료되었습니다.",
+    "apply_massage": "안마의자 신청이 완료되었습니다.",
+    "apply_music": "기상음악 신청이 완료되었습니다.",
+}
+
+_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+_URL_PATTERN = re.compile(r"https?://\S+")
+
 try:
     web_search_tool = TavilySearch(
         max_results=MAX_WEB_SEARCH_RESULTS,
@@ -53,8 +74,15 @@ class AnswerGrade(BaseModel):
     addresses_question: bool = Field(description="답변이 실제로 질문에 답하고 있으면 true, 아니면 false")
 
 
+class BookingIntent(BaseModel):
+    action: Literal["apply_study", "apply_massage", "apply_music", "cancel", "unclear"] = Field(
+        description="사용자가 요청한 신청 액션. 취소 의도면 cancel, 셋 중 무엇인지 특정할 수 없으면 unclear"
+    )
+
+
 document_grader_llm = llm.with_structured_output(DocumentRelevanceGrade)
 answer_grader_llm = llm.with_structured_output(AnswerGrade)
+booking_intent_llm = llm.with_structured_output(BookingIntent)
 
 
 class GraphState(TypedDict):
@@ -67,6 +95,10 @@ class GraphState(TypedDict):
     original_query: NotRequired[str]
     retrieve_retry_count: NotRequired[int]
     answer_retry_count: NotRequired[int]
+    auth_token: NotRequired[str | None]
+    booking_action: NotRequired[Literal["apply_study", "apply_massage", "apply_music"] | None]
+    booking_slots: NotRequired[dict]
+    booking_ready: NotRequired[bool]
 
 
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
@@ -88,7 +120,7 @@ def _last_message_content(messages: list[AnyMessage], message_type: type) -> str
 async def route_question(state: GraphState) -> dict:
     """LLM으로 질문을 vectorstore / booking / general_chat / web_search 로 분류한다.
 
-    booking은 아직 실제 예약 서브그래프가 없어 자리표시(booking_stub)로 응답한다.
+    booking은 extract_booking_slot으로 이어져 자습/안마의자/기상음악 신청을 처리한다.
     """
     question = state["messages"][-1].content
     response = await llm.ainvoke([
@@ -110,12 +142,110 @@ def _bump_answer_retry_if_reentering(state: GraphState) -> dict:
     return {}
 
 
-async def booking_stub(state: GraphState) -> dict:
-    """다음 단계(3단계)에서 실제 예약 서브그래프로 교체될 자리표시. grade_answer도 다른 경로와
-    동일하게 거치므로, 재시도 진입 시 answer_retry_count도 똑같이 올려준다."""
-    update = _bump_answer_retry_if_reentering(state)
-    reply = "예약 기능은 아직 준비 중입니다. (booking 서브그래프는 다음 단계에서 구현)"
-    return {**update, "messages": state["messages"] + [AIMessage(content=reply)]}
+def _extract_youtube_url(text: str) -> str | None:
+    """메시지에서 youtube.com/youtu.be 도메인의 URL만 뽑아낸다. 서브도메인 스푸핑
+    (예: youtube.com.evil.com) 방지를 위해 netloc을 정확히 검사한다."""
+    for match in _URL_PATTERN.finditer(text):
+        url = match.group(0).rstrip(").,'\"")
+        if urlparse(url).netloc.lower() in _YOUTUBE_HOSTS:
+            return url
+    return None
+
+
+def _extract_booking_error_message(response: httpx.Response) -> str | None:
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        message = data.get("message") or data.get("error")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+async def extract_booking_slot(state: GraphState) -> dict:
+    """3가지 신청 액션(자습/안마의자/기상음악) 중 무엇인지 분류한다. 확인 단계 없이,
+    슬롯이 다 채워지면 바로 execute_booking으로 보낸다(booking_ready=True).
+    기상음악은 유튜브 링크가 없으면 되묻고, 취소 의도는 안내만 하고 종료한다
+    (booking_ready=False — route_after_booking_slot이 이 경우 END로 보낸다)."""
+    question = state["messages"][-1].content
+
+    try:
+        intent = await booking_intent_llm.ainvoke([
+            SystemMessage(content=BOOKING_INTENT_SYSTEM_PROMPT),
+            HumanMessage(content=question),
+        ])
+        action = intent.action
+    except Exception:
+        action = "unclear"
+
+    if action == "cancel":
+        reply = "취소는 사이트에서 직접 진행해주세요."
+        return {
+            "booking_ready": False,
+            "messages": state["messages"] + [AIMessage(content=reply)],
+        }
+
+    if action == "unclear":
+        reply = "자습실/안마의자/기상음악 중 어떤 것을 신청하시겠어요?"
+        return {
+            "booking_ready": False,
+            "messages": state["messages"] + [AIMessage(content=reply)],
+        }
+
+    if action == "apply_music":
+        music_url = _extract_youtube_url(question)
+        if music_url is None:
+            reply = "기상음악으로 등록할 유튜브 링크를 알려주세요."
+            return {
+                "booking_action": action,
+                "booking_ready": False,
+                "messages": state["messages"] + [AIMessage(content=reply)],
+            }
+        return {"booking_action": action, "booking_slots": {"musicUrl": music_url}, "booking_ready": True}
+
+    # apply_study / apply_massage: 별도 슬롯 없이 바로 실행 대상.
+    return {"booking_action": action, "booking_slots": {}, "booking_ready": True}
+
+
+async def execute_booking(state: GraphState) -> dict:
+    """auth_token으로 실제 신청 API를 호출한다. 성공/인증만료/신청불가/서버·네트워크오류
+    4갈래로 안내하며, 어떤 경우에도 예외로 죽지 않는다. auth_token 값은 로그에 남기지 않는다.
+
+    grade_answer를 거치긴 하지만(route_after_grade_answer 참고) booking은 재시도 대상에서
+    제외되므로, 다른 노드들과 달리 answer_retry_count를 올리지 않는다 — 실제 신청을
+    중복 호출하지 않기 위함이다."""
+    auth_token = state.get("auth_token")
+
+    if not auth_token:
+        reply = "로그인이 필요합니다."
+        return {"messages": state["messages"] + [AIMessage(content=reply)]}
+
+    action = state["booking_action"]
+
+    try:
+        method, path = BOOKING_ENDPOINTS[action]
+        body = state.get("booking_slots") or {}
+        bearer_token = auth_token if auth_token.startswith("Bearer ") else f"Bearer {auth_token}"
+
+        async with httpx.AsyncClient(base_url=BOOKING_API_BASE_URL, timeout=10.0) as client:
+            response = await client.request(
+                method, path, json=body, headers={"Authorization": bearer_token}
+            )
+
+        if response.is_success:
+            reply = BOOKING_SUCCESS_MESSAGES[action]
+        elif response.status_code == 401:
+            reply = "로그인이 만료됐어요. 다시 로그인 후 시도해주세요."
+        elif response.status_code in (400, 409):
+            reply = _extract_booking_error_message(response) or "지금은 신청할 수 없어요."
+        else:
+            reply = "처리 중 문제가 발생했어요. 잠시 후 다시 시도해주세요."
+    except Exception:
+        reply = "처리 중 문제가 발생했어요. 잠시 후 다시 시도해주세요."
+
+    return {"messages": state["messages"] + [AIMessage(content=reply)]}
 
 
 async def general_chat(state: GraphState) -> dict:
@@ -242,15 +372,21 @@ async def generate(state: GraphState) -> dict:
         for doc in context
     )
 
-    prompt = (
-        "당신은 학교 웹사이트(Flooding)의 AI 챗봇입니다. "
-        "아래 문서 내용만 사용해서 질문에 답변하세요. 존댓말을 사용하세요. "
-        "문서에 (출처: ...)가 붙어 있으면 답변 마지막에 참고한 출처를 밝히세요.\n\n"
-        f"[문서]\n{context_text}\n\n"
-        f"[질문]\n{question}"
-    )
-    response = await llm.ainvoke(prompt)
-    return {**update, "messages": state["messages"] + [AIMessage(content=response.content)]}
+    response = await llm.ainvoke([
+        SystemMessage(content=GENERATE_SYSTEM_PROMPT),
+        HumanMessage(content=f"[문서]\n{context_text}\n\n[질문]\n{question}"),
+    ])
+    answer = response.content
+
+    # 출처가 있는 문서(web_search 결과)인데 LLM이 인용을 빠뜨리면, 프롬프트 준수에만
+    # 맡기지 않고 코드에서 확정적으로 붙여준다. source가 없는 RAG 문서는 애초에
+    # 이 목록이 비어 있어서 아무것도 덧붙지 않는다.
+    if "(출처:" not in answer:
+        sources = [doc.metadata["source"] for doc in context if doc.metadata.get("source")]
+        if sources:
+            answer = f"{answer}\n\n(출처: {sources[0]})"
+
+    return {**update, "messages": state["messages"] + [AIMessage(content=answer)]}
 
 
 async def grade_answer(state: GraphState) -> dict:

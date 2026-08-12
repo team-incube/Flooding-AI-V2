@@ -21,4 +21,5 @@ dependencies = [
     "ragas>=0.4.3",
     "datasets>=4.8.5",
     "langchain-tavily>=0.2.18",
+    "httpx>=0.28.1",
 ]
