@@ -162,15 +162,43 @@ execute_booking ───┘         │ (fail, mode≠"booking", answer_retry_c
 - Reachable **only** from `route_question` classifying a turn as `web_search`
   (not about the school, needs current/factual info) — never from inside the
   RAG spine (see "Why `web_search` isn't in the RAG spine").
+- Before calling Tavily, the raw user message is rewritten by a dedicated LLM
+  pass (`WEB_SEARCH_QUERY_SYSTEM_PROMPT`) that strips greetings/filler ("안녕",
+  "저기요") while preserving temporal cues ("오늘", "지금") and never inventing
+  a location. This exists because greeting-polluted queries measurably return
+  off-topic results: `"안녕! 오늘 날씨 어때?"` searched verbatim surfaced a
+  weather-vocabulary blog and a kids' weather song instead of an actual
+  forecast, while the same query with just the greeting stripped surfaced
+  기상청/네이버날씨/서울시 관광정보 with real forecast data. Falls back to the
+  raw message if the rewrite call errors.
 - Fetches a handful of results (max 5, snippet-only — no full-page crawl) and
   turns them into `Document`s with `metadata["source"]` set to the result URL,
   same shape `retrieve` produces, so `generate` handles both identically.
 - `generate` cites `metadata["source"]` in the reply when present (RAG-store
   docs don't carry `source`, so citation only shows up for real web results).
 - If `TAVILY_API_KEY` is missing or the request fails, falls back to an empty
-  `context` — `generate` answers "don't know" instead of crashing or inventing.
+  `context` — `generate` answers `WEB_SEARCH_NO_INFO_REPLY` ("정확한 실시간
+  정보를 찾지 못했어요...") instead of crashing or inventing.
 - Results are **not** re-graded by `grade_documents` — they go straight into
   `generate`, then through the same `grade_answer` gate as everything else.
+  Instead of a grading node, `generate` gets an extra instruction block for
+  `mode == "web_search"` (`GENERATE_WEB_SEARCH_ADDENDUM`): if the search
+  snippets don't actually contain the point-in-time fact the question needs
+  (current time, a live price, today's score), it must give the same honest
+  `WEB_SEARCH_NO_INFO_REPLY` rather than stretching topically-related-but-
+  non-answering content into a fabricated answer. Verified live against
+  4 categories: current time (genuinely unanswerable from static snippets —
+  correctly declines), live crypto price and today's sports scores (snippets
+  did contain the specific value — answered from it), and a static historical
+  fact (Nobel prize winner — unaffected control, answered normally). The
+  forced source-citation fallback (see below) is skipped when the reply
+  contains `WEB_SEARCH_NO_INFO_MARKER`, so a declined answer doesn't get an
+  unrelated URL tacked onto it.
+- A residual known gap: search snippets can be stale (e.g. a cached price page
+  dated days before the request) with no staleness signal for `generate` to
+  detect — it will state a snippet's number as current if the snippet phrases
+  it that way. Out of scope for this fix; would need either a per-result
+  freshness check or a dedicated price/time API instead of generic search.
 
 ## Booking sub-graph (actions, outside the RAG loop)
 
