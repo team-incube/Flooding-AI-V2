@@ -1,0 +1,18 @@
+.venv/
+.git/
+__pycache__/
+**/__pycache__/
+.claude/
+docs/
+.env
+*.env
+!*.env.example
+cache/
+data/eval_results/
+
+# NOTE: chroma_db/ is intentionally NOT ignored.
+# app/langgraph_services/nodes.py builds the retriever at import time
+# (module-level `retriever = get_retriever()`), and embedding.py's
+# get_retriever() calls OpenAI embeddings immediately if ./chroma_db is
+# missing -- so without a prebuilt chroma_db in the image, the server
+# fails to start unless a real OPENAI_API_KEY is present.

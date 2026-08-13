@@ -22,21 +22,25 @@ RUN python -m pip install --upgrade pip setuptools wheel
 COPY . .
 
 # Install project dependencies (explicit, avoid building wheel from workspace layout)
+# NOTE: each spec MUST be quoted -- unquoted "pkg>=1.2.3" is parsed by the shell
+# as "pkg" with stdout redirected to a file named "=1.2.3", silently dropping the
+# version constraint and littering /app with junk files.
 RUN pip install --no-cache-dir \
-    fastapi>=0.135.1 \
-    langchain>=1.2.12 \
-    langchain-openai>=1.1.11 \
-    pydantic>=2.12.5 \
-    python-dotenv>=1.2.2 \
-    spotipy>=2.25.1 \
-    uvicorn>=0.42.0 \
-    google-api-python-client>=2.70.0 \
-    langchain-community>=0.4.1 \
-    pymupdf>=1.27.2.2 \
-    langchain-chroma>=1.1.0 \
-    langchain-core>=1.2.23 \
-    langgraph>=1.1.3 \
-    langchain-tavily>=0.2.18
+    "fastapi>=0.135.1" \
+    "langchain>=1.2.12" \
+    "langchain-openai>=1.1.11" \
+    "pydantic>=2.12.5" \
+    "python-dotenv>=1.2.2" \
+    "spotipy>=2.25.1" \
+    "uvicorn>=0.42.0" \
+    "google-api-python-client>=2.70.0" \
+    "langchain-community>=0.4.1" \
+    "pymupdf>=1.27.2.2" \
+    "langchain-chroma>=1.1.0" \
+    "langchain-core>=1.2.23" \
+    "langgraph>=1.1.3" \
+    "langchain-tavily>=0.2.18" \
+    "httpx>=0.28.1"
 
 # Expose port for FastAPI
 EXPOSE 8000
