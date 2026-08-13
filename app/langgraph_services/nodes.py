@@ -17,9 +17,11 @@ from app.langgraph_services.prompts import (
     DOCUMENT_GRADE_SYSTEM_PROMPT,
     GENERAL_CHAT_SYSTEM_PROMPT,
     GENERATE_SYSTEM_PROMPT,
+    GENERATE_WEB_SEARCH_ADDENDUM,
     ROUTE_MODES,
     ROUTE_SYSTEM_PROMPT,
     TRANSFORM_QUERY_SYSTEM_PROMPT,
+    WEB_SEARCH_QUERY_SYSTEM_PROMPT,
 )
 from app.services.embedding import get_retriever
 
@@ -38,6 +40,11 @@ MAX_ANSWER_RETRY = 1
 
 # 전체 페이지 크롤링이 아니라 요약 스니펫만 받도록 include_raw_content=False로 고정.
 MAX_WEB_SEARCH_RESULTS = 5
+
+# generate()가 실시간 정보를 못 찾았다고 정직하게 답할 때 쓰는 고정 문구. 이 마커가 답변에
+# 있으면 출처를 강제로 붙이지 않는다 — 근거로 쓰지 않은 검색 결과를 출처처럼 붙이면 오해를 준다.
+WEB_SEARCH_NO_INFO_MARKER = "정확한 실시간 정보를 찾지 못했"
+WEB_SEARCH_NO_INFO_REPLY = f"{WEB_SEARCH_NO_INFO_MARKER}어요. 관련 웹사이트나 앱에서 직접 확인해보시는 게 정확할 것 같아요."
 
 # 개발 서버. 취소는 이번 범위에서 제외 — 신청 3종만 지원.
 BOOKING_API_BASE_URL = "https://dev.flooding.kr"
@@ -323,11 +330,24 @@ async def transform_query(state: GraphState) -> dict:
 
 async def web_search(state: GraphState) -> dict:
     """Tavily로 폴백 검색한다. 도구가 없거나(TAVILY_API_KEY 미설정) 호출이 실패하거나
-    결과가 없으면 빈 context를 반환해 generate가 "모른다" 답변으로 안전하게 폴백한다."""
+    결과가 없으면 빈 context를 반환해 generate가 "모른다" 답변으로 안전하게 폴백한다.
+
+    Tavily에 넘기기 전에 인사말/추임새를 걷어낸 검색어로 정제한다 — "안녕! 오늘 날씨
+    어때?"처럼 인사말이 섞인 원문 그대로 검색하면 날씨 자체가 아니라 "날씨 표현/동요"
+    같은 무관한 콘텐츠가 걸리는 게 실측으로 확인됐다. 정제 실패 시 원문 질문으로 폴백한다."""
     if web_search_tool is None:
         return {"context": []}
 
-    query = state.get("query") or state["messages"][-1].content
+    raw_query = state.get("query") or state["messages"][-1].content
+
+    try:
+        query_rewrite = await llm.ainvoke([
+            SystemMessage(content=WEB_SEARCH_QUERY_SYSTEM_PROMPT),
+            HumanMessage(content=raw_query),
+        ])
+        query = query_rewrite.content.strip() or raw_query
+    except Exception:
+        query = raw_query
 
     try:
         raw_results = await web_search_tool.ainvoke({"query": query})
@@ -359,9 +379,11 @@ async def generate(state: GraphState) -> dict:
 
     context = state.get("context") or []
 
+    is_web_search = state.get("mode") == "web_search"
+
     if not context:
-        if state.get("mode") == "web_search":
-            reply = "죄송해요, 관련 정보를 찾지 못했어요."
+        if is_web_search:
+            reply = WEB_SEARCH_NO_INFO_REPLY
         else:
             reply = "관련 문서를 찾을 수 없어 답변드릴 수 없습니다. 학교 담당 부서에 문의해 주세요."
         return {**update, "messages": state["messages"] + [AIMessage(content=reply)]}
@@ -372,16 +394,19 @@ async def generate(state: GraphState) -> dict:
         for doc in context
     )
 
+    system_prompt = GENERATE_SYSTEM_PROMPT + GENERATE_WEB_SEARCH_ADDENDUM if is_web_search else GENERATE_SYSTEM_PROMPT
+
     response = await llm.ainvoke([
-        SystemMessage(content=GENERATE_SYSTEM_PROMPT),
+        SystemMessage(content=system_prompt),
         HumanMessage(content=f"[문서]\n{context_text}\n\n[질문]\n{question}"),
     ])
     answer = response.content
 
     # 출처가 있는 문서(web_search 결과)인데 LLM이 인용을 빠뜨리면, 프롬프트 준수에만
     # 맡기지 않고 코드에서 확정적으로 붙여준다. source가 없는 RAG 문서는 애초에
-    # 이 목록이 비어 있어서 아무것도 덧붙지 않는다.
-    if "(출처:" not in answer:
+    # 이 목록이 비어 있어서 아무것도 덧붙지 않는다. 단, "정보를 못 찾았다"고 정직하게
+    # 물러난 답변에는 그 근거가 되지 않은 출처를 붙이면 오히려 오해를 주므로 붙이지 않는다.
+    if "(출처:" not in answer and WEB_SEARCH_NO_INFO_MARKER not in answer:
         sources = [doc.metadata["source"] for doc in context if doc.metadata.get("source")]
         if sources:
             answer = f"{answer}\n\n(출처: {sources[0]})"
