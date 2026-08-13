@@ -41,6 +41,13 @@ MAX_ANSWER_RETRY = 1
 # 전체 페이지 크롤링이 아니라 요약 스니펫만 받도록 include_raw_content=False로 고정.
 MAX_WEB_SEARCH_RESULTS = 5
 
+# Flooding은 한국 학교 서비스라 사용자 대다수가 한국에 있다고 가정하는 게 합리적이다.
+# 개별 사용자의 실제 위치를 지어내는 것과는 다른 문제 — 서비스 전체의 기본 지역 설정이므로
+# Tavily의 country 파라미터(topic="general"에서만 적용)로 검색 결과를 한국 쪽으로 boost한다.
+# 쿼리 정제 프롬프트(WEB_SEARCH_QUERY_SYSTEM_PROMPT)가 "위치를 지어내지 말라"는 것과는
+# 별개 레이어이므로 그 프롬프트는 건드리지 않는다.
+WEB_SEARCH_DEFAULT_COUNTRY = "south korea"
+
 # generate()가 실시간 정보를 못 찾았다고 정직하게 답할 때 쓰는 고정 문구. 이 마커가 답변에
 # 있으면 출처를 강제로 붙이지 않는다 — 근거로 쓰지 않은 검색 결과를 출처처럼 붙이면 오해를 준다.
 WEB_SEARCH_NO_INFO_MARKER = "정확한 실시간 정보를 찾지 못했"
@@ -67,6 +74,7 @@ try:
         max_results=MAX_WEB_SEARCH_RESULTS,
         search_depth="basic",
         include_raw_content=False,
+        country=WEB_SEARCH_DEFAULT_COUNTRY,
     )
 except Exception:
     web_search_tool = None  # TAVILY_API_KEY 없음 등 — web_search가 빈 context로 안전하게 폴백

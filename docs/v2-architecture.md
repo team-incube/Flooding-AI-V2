@@ -171,6 +171,17 @@ execute_booking ───┘         │ (fail, mode≠"booking", answer_retry_c
   forecast, while the same query with just the greeting stripped surfaced
   기상청/네이버날씨/서울시 관광정보 with real forecast data. Falls back to the
   raw message if the rewrite call errors.
+- The `TavilySearch` tool is constructed with `country="south korea"`
+  (`WEB_SEARCH_DEFAULT_COUNTRY`), which boosts (does not hard-filter) results
+  toward Korea — separate from, and not a contradiction of, the "never invent
+  a location" rule above. That rule is about not putting a fabricated
+  per-user location into the *query text* (e.g. guessing a specific city);
+  the `country` param is a service-wide default region for a Korean school
+  chatbot, passed directly to Tavily's API rather than the query. Only takes
+  effect when `topic="general"` (the tool's default — never overridden here).
+  Verified live: "오늘 날씨 어때?" now resolves via 기상청 (kma.go.kr) with a
+  plausible Korea forecast, and "지금 환율 얼마야?" resolves USD/KRW from a
+  Korean financial source, instead of defaulting to US-region results.
 - Fetches a handful of results (max 5, snippet-only — no full-page crawl) and
   turns them into `Document`s with `metadata["source"]` set to the result URL,
   same shape `retrieve` produces, so `generate` handles both identically.
