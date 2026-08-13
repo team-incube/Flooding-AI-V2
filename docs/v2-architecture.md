@@ -1,14 +1,17 @@
-# Flooding-AI-V2 — LangGraph Re-architecture Spec
+# Flooding-AI-V2 — LangGraph Architecture Spec
 
-Target design for rewriting the chatbot from LangChain `create_agent` onto a
-LangGraph graph. This is the **single source of truth for the rewrite**; when a
-node/edge is built, it should match what's here. This is a re-architecture, not a
-port — it adds a web-search fallback, booking actions, and an Adaptive /
-self-corrective RAG loop that the current agent doesn't have.
+Spec for the chatbot graph that replaced the old LangChain `create_agent`
+implementation. This is the **single source of truth for the graph**; when a
+node/edge changes in code, update this doc in the same session. This was a
+re-architecture, not a port — it added a dedicated `web_search` branch, booking
+actions, and an Adaptive / self-corrective RAG loop that the old agent didn't have.
 
-> Status is tracked in `CLAUDE.md`. While that file's status block says the graph
-> doesn't exist yet, this document is aspirational (the plan). Once nodes land,
-> keep this doc in sync with the actual graph.
+> **Status: live and built.** `CLAUDE.md`'s status block confirms `POST /ai/chat`
+> calls `app.langgraph_services.graph.ask` — this is the serving path, not a plan.
+> `app/services/chatbot.py` (the old `create_agent` version) is kept only for the
+> RAGAS before/after baseline. Everything below describes the graph as it exists
+> in `app/langgraph_services/{graph,nodes,routing,prompts}.py` today; keep this
+> doc in sync whenever those files change.
 
 ## Why re-architect
 
@@ -179,6 +182,15 @@ scope** — `extract_booking_slot` detects cancel intent and tells the user to c
 on the site directly, without calling any API. There is **no confirmation step**:
 once an apply intent (and its slot, if any) is resolved, `execute_booking` runs
 immediately.
+
+The original design in this doc had a `confirm_with_user` step between slot
+extraction and execution; it was removed because this is a text-only chat UI with
+no button/card affordance to confirm against — a confirmation step would just be
+another free-text turn the router has to reinterpret, which doesn't reliably
+reduce misclassification risk and adds a round-trip to every booking. The
+trade-off: if `extract_booking_slot` misclassifies intent (e.g. applies for the
+massage chair when the user meant the study room), the **only** way to undo it is
+the site's own cancel UI — the chatbot itself has no cancel path (see above).
 
 ```
                     ┌─(apply_study / apply_massage, or apply_music with a link)──→ execute_booking → grade_answer
