@@ -130,6 +130,7 @@ before/after quality can be measured on the same question set.
 - `YOUTUBE_API_KEY` — YouTube link search.
 - `SPOTIPY_CLIENT_ID`, `SPOTIPY_CLIENT_SECRET` — Spotify search.
 - `TAVILY_API_KEY` — `web_search` node in the LangGraph chatbot; optional (safe fallback if unset).
+- `ALLOWED_ORIGINS` — comma-separated CORS allowlist for `app/main.py`'s `CORSMiddleware`. Optional; defaults to `https://flooding.kr,http://localhost:3000` if unset. Must include every frontend origin that calls `/ai/chat` / `/ai/song` with credentials (e.g. add `https://prod.flooding.kr` if the frontend itself is served from there instead of `https://flooding.kr`).
 
 Booking does **not** read a `BOOKING_API_BASE_URL` env var — the dev API base
 (`https://dev.flooding.kr`) is a hardcoded constant in
